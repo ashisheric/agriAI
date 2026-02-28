@@ -1,10 +1,10 @@
-#!/usr/bin/env python
 import streamlit as st
 from openai import OpenAI
 import os
 import base64
 import requests
 import pandas as pd
+from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from sqlalchemy import create_engine, Column, Integer, String, Float
@@ -38,37 +38,24 @@ Session = sessionmaker(bind=engine)
 session = Session()
 
 # =============================
-# SOIL SCORE FUNCTION
+# HELPER FUNCTIONS
 # =============================
 def calculate_score(ph, nitrogen, phosphorus, potassium, organic):
     score = 100
-    if ph > 8 or ph < 5.5:
-        score -= 15
-    if nitrogen == "Low":
-        score -= 20
-    if phosphorus == "Low":
-        score -= 15
-    if potassium == "Low":
-        score -= 15
-    if organic == "Low":
-        score -= 20
+    if ph > 8 or ph < 5.5: score -= 15
+    if nitrogen == "Low": score -= 20
+    if phosphorus == "Low": score -= 15
+    if potassium == "Low": score -= 15
+    if organic == "Low": score -= 20
     return max(score, 0)
 
-# =============================
-# FERTILIZER CALCULATOR
-# =============================
 def fertilizer_advice(nitrogen):
-    if nitrogen == "Low":
-        return "यूरिया 45-50 kg प्रति एकड़ डालें।"
-    return "नाइट्रोजन संतुलित है।"
+    return "यूरिया 45-50 kg प्रति एकड़ डालें।" if nitrogen=="Low" else "नाइट्रोजन संतुलित है।"
 
-# =============================
-# WEATHER API
-# =============================
-def get_weather(city):    
+def get_weather(city):
     api_key = st.secrets.get("OPENWEATHER_API_KEY", "")
-    if not api_key:
-        return "मौसम डेटा उपलब्ध नहीं (API key missing)"
+    if not api_key or not city.strip(): 
+        return "मौसम डेटा उपलब्ध नहीं"
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
         data = requests.get(url).json()
@@ -76,68 +63,65 @@ def get_weather(city):
     except:
         return "मौसम डेटा उपलब्ध नहीं"
 
-# =============================
-# PDF GENERATOR
-# =============================
-import tempfile
-
-def generate_pdf(text):
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    c = canvas.Canvas(tmp_file.name, pagesize=letter)
+def generate_pdf_bytes(text):
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
     y = 750
     for line in text.split("\n"):
         c.drawString(40, y, line)
         y -= 15
     c.save()
-    return tmp_file.name
+    buffer.seek(0)
+    return buffer
 
-# =============================
-# TTS FUNCTION (Hindi)
-# =============================
 def text_to_speech(text):
     api_key = st.secrets.get("SARVAM_API_KEY", "")
-    if not api_key:
+    if not api_key: 
         st.warning("SarvamAI API key missing")
         return None
     os.environ["SARVAM_API_KEY"] = api_key
     client = SarvamAI(api_subscription_key=api_key)
-
-    if len(text) > 2500:
-        text = text[:2500]
-
+    text = text[:1500]  # limit length for speed
     try:
-        tts = client.text_to_speech.convert(
-            text=text,
-            target_language_code="hi-IN",
-            model="bulbul:v3",
-            speaker="shubh"
-        )
+        tts = client.text_to_speech.convert(text=text, target_language_code="hi-IN", model="bulbul:v3", speaker="shubh")
         audio_bytes = base64.b64decode(tts.audios[0])
-        with open("soil_audio.wav", "wb") as f:
-            f.write(audio_bytes)
-        return "soil_audio.wav"
+        return BytesIO(audio_bytes)
     except Exception as e:
         st.warning("TTS failed: " + str(e))
         return None
 
 # =============================
-# OPENROUTER CLIENT (Cloud LLM)
+# OPENROUTER LLM CLIENT
 # =============================
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=st.secrets["OPENROUTER_API_KEY"],
-)
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=st.secrets["OPENROUTER_API_KEY"])
 
-# =============================
-# CACHE LLM RESPONSES
-# =============================
-@st.cache_data(show_spinner=False, ttl=3600)
-def get_analysis(prompt):
+@st.cache_data(show_spinner=False)
+def get_analysis(ph, nitrogen, phosphorus, potassium, organic, weather_info):
+    sample = f"""
+pH: {ph}
+Nitrogen: {nitrogen}
+Phosphorus: {phosphorus}
+Potassium: {potassium}
+Organic Carbon: {organic}
+"""
+    prompt = f"""
+आप भारतीय कृषि वैज्ञानिक हैं।
+इस मिट्टी रिपोर्ट का विश्लेषण करें:
+{sample}
+
+मौसम जानकारी:
+{weather_info}
+
+सुधार योजना, फसल सुझाव और 6 महीने की योजना दें।
+उत्तर हिंदी में दें।
+"""
     response = client.chat.completions.create(
-        model="openrouter/free",  # Free shared model endpoint
-        messages=[{"role": "user", "content": prompt}],
+        model="openrouter/free",
+        messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content
+
+import time  # <-- import time module
 
 # =============================
 # STREAMLIT UI
@@ -151,8 +135,13 @@ phosphorus = st.selectbox("Phosphorus", ["Low", "Medium", "High"])
 potassium = st.selectbox("Potassium", ["Low", "Medium", "High"])
 organic = st.selectbox("Organic Carbon", ["Low", "Medium", "High"])
 
+import concurrent.futures
+
 if st.button("🔍 Analyze Soil"):
-    # Save to DB
+    timing_info = {}
+
+    # 1️⃣ Save to DB
+    start = time.time()
     report = SoilReport(
         farmer_name=farmer_name,
         ph=ph,
@@ -163,73 +152,71 @@ if st.button("🔍 Analyze Soil"):
     )
     session.add(report)
     session.commit()
+    timing_info["DB Save"] = time.time() - start
 
-    # Score and Weather
+    # 2️⃣ Score calculation
+    start = time.time()
     score = calculate_score(ph, nitrogen, phosphorus, potassium, organic)
+    timing_info["Score Calculation"] = time.time() - start
+
+    # 3️⃣ Weather API
+    start = time.time()
     weather_info = get_weather(city)
+    timing_info["Weather API"] = time.time() - start
 
-    # Prompt for LLM
-    sample = f"""
-    pH: {ph}
-    Nitrogen: {nitrogen}
-    Phosphorus: {phosphorus}
-    Potassium: {potassium}
-    Organic Carbon: {organic}
-    """
-
-    prompt = f"""
-    आप भारतीय कृषि वैज्ञानिक हैं।
-    इस मिट्टी रिपोर्ट का विश्लेषण करें:
-    {sample}
-
-    मौसम जानकारी:
-    {weather_info}
-
-    सुधार योजना, फसल सुझाव और 6 महीने की योजना दें।
-    उत्तर हिंदी में दें।
-    """
-    # Spinner while LLM runs
-    with st.spinner("🤖 AI is analyzing soil, please wait..."):
-        analysis = get_analysis(prompt)
-    fertilizer = fertilizer_advice(nitrogen)
-
-    final_report = f"""
+    # 4️⃣ Prepare final report template (without LLM/TTS yet)
+    final_report_template = f"""
 🌱 Soil Health Score: {score}/100
 
 🌦 मौसम जानकारी:
 {weather_info}
-
+"""
+    
+    # 5️⃣ Run LLM and TTS concurrently
+    start = time.time()
+    with st.spinner("🤖 AI is analyzing soil and generating audio, please wait..."):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_llm = executor.submit(get_analysis, ph, nitrogen, phosphorus, potassium, organic, weather_info)
+            # We'll generate TTS after we get analysis text
+            analysis = future_llm.result()
+            final_report = final_report_template + f"""
 🤖 AI विश्लेषण:
 {analysis}
 
 💊 उर्वरक सलाह:
-{fertilizer}
+{fertilizer_advice(nitrogen)}
 """
+            future_tts = executor.submit(text_to_speech, final_report)
+            audio_buffer = future_tts.result()
+    timing_info["LLM + TTS"] = time.time() - start
 
+    # 6️⃣ PDF generation
+    start = time.time()
+    pdf_buffer = generate_pdf_bytes(final_report)
+    timing_info["PDF Generation"] = time.time() - start
+
+    # 7️⃣ Display final report
     st.success("📋 Final Soil Report")
     st.write(final_report)
+    st.download_button("📄 Download PDF", pdf_buffer, file_name="Soil_Report.pdf")
+    if audio_buffer:
+        st.audio(audio_buffer)
 
-    # PDF
-    pdf_file = generate_pdf(final_report)
-    st.download_button("📄 Download PDF", open(pdf_file, "rb"), file_name=pdf_file)
-
-    # TTS
-    audio_file = text_to_speech(final_report)
-    st.audio(audio_file)
+    # 8️⃣ Print timing info
+    #st.subheader("⏱ Module Execution Time (seconds)")
+    #for module, t in timing_info.items():
+    #    st.write(f"{module}: {t:.2f}s")
 
 # =============================
 # HISTORY SECTION
 # =============================
 st.subheader("📊 पिछले रिपोर्ट")
-reports = session.query(SoilReport).order_by(SoilReport.id.desc()).limit(5).all()
-data = [{
-    "Farmer": r.farmer_name,
-    "pH": r.ph,
-    "N": r.nitrogen,
-    "P": r.phosphorus,
-    "K": r.potassium,
-    "Organic": r.organic_carbon
-} for r in reports]
+@st.cache_data
+def get_history():
+    return session.query(SoilReport).order_by(SoilReport.id.desc()).limit(5).all()
 
-if data:
+reports = get_history()
+if reports:
+    data = [{"Farmer": r.farmer_name, "pH": r.ph, "N": r.nitrogen,
+             "P": r.phosphorus, "K": r.potassium, "Organic": r.organic_carbon} for r in reports]
     st.dataframe(pd.DataFrame(data))
