@@ -134,7 +134,7 @@ client = OpenAI(
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_analysis(prompt):
     response = client.chat.completions.create(
-        model="openrouter/gpt-3.5-mini",  # Free shared model endpoint
+        model="openrouter/free",  # Free shared model endpoint
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content
