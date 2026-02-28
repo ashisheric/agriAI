@@ -66,7 +66,7 @@ def fertilizer_advice(nitrogen):
 # WEATHER API
 # =============================
 def get_weather(city):    
-    api_key = st.secrets.get("OPENWEATHER_API", "")
+    api_key = st.secrets.get("OPENWEATHER_API_KEY", "")
     if not api_key:
         return "मौसम डेटा उपलब्ध नहीं (API key missing)"
     try:
