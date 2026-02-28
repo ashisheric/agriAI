@@ -191,7 +191,6 @@ if st.button("🔍 Analyze Soil"):
     # Spinner while LLM runs
     with st.spinner("🤖 AI is analyzing soil, please wait..."):
         analysis = get_analysis(prompt)
-
     fertilizer = fertilizer_advice(nitrogen)
 
     final_report = f"""
