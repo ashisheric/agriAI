@@ -65,10 +65,12 @@ def fertilizer_advice(nitrogen):
 # =============================
 # WEATHER API
 # =============================
-def get_weather(city):
-    api_key = st.secrets["OPENWEATHER_API_KEY"]
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+def get_weather(city):    
+    api_key = st.secrets.get("OPENWEATHER_API", "")
+    if not api_key:
+        return "मौसम डेटा उपलब्ध नहीं (API key missing)"
     try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
         data = requests.get(url).json()
         return f"तापमान: {data['main']['temp']}°C, मौसम: {data['weather'][0]['description']}"
     except:
@@ -77,40 +79,46 @@ def get_weather(city):
 # =============================
 # PDF GENERATOR
 # =============================
+import tempfile
+
 def generate_pdf(text):
-    file_name = "Soil_Report.pdf"
-    c = canvas.Canvas(file_name, pagesize=letter)
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    c = canvas.Canvas(tmp_file.name, pagesize=letter)
     y = 750
     for line in text.split("\n"):
         c.drawString(40, y, line)
         y -= 15
     c.save()
-    return file_name
+    return tmp_file.name
 
 # =============================
 # TTS FUNCTION (Hindi)
 # =============================
 def text_to_speech(text):
-    from sarvamai import SarvamAI
-    client = SarvamAI(
-        api_subscription_key=st.secrets["SARVAM_API_KEY"]
-    )
+    api_key = st.secrets.get("SARVAM_API_KEY", "")
+    if not api_key:
+        st.warning("SarvamAI API key missing")
+        return None
+    os.environ["SARVAM_API_KEY"] = api_key
+    client = SarvamAI(api_subscription_key=api_key)
 
     if len(text) > 2500:
         text = text[:2500]
 
-    tts = client.text_to_speech.convert(
-        text=text,
-        target_language_code="hi-IN",
-        model="bulbul:v3",
-        speaker="shubh"
-    )
-
-    audio_bytes = base64.b64decode(tts.audios[0])
-    with open("soil_audio.wav", "wb") as f:
-        f.write(audio_bytes)
-
-    return "soil_audio.wav"
+    try:
+        tts = client.text_to_speech.convert(
+            text=text,
+            target_language_code="hi-IN",
+            model="bulbul:v3",
+            speaker="shubh"
+        )
+        audio_bytes = base64.b64decode(tts.audios[0])
+        with open("soil_audio.wav", "wb") as f:
+            f.write(audio_bytes)
+        return "soil_audio.wav"
+    except Exception as e:
+        st.warning("TTS failed: " + str(e))
+        return None
 
 # =============================
 # OPENROUTER CLIENT (Cloud LLM)
@@ -123,10 +131,10 @@ client = OpenAI(
 # =============================
 # CACHE LLM RESPONSES
 # =============================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def get_analysis(prompt):
     response = client.chat.completions.create(
-        model="openrouter/free",  # Free shared model endpoint
+        model="openrouter/gpt-3.5-mini",  # Free shared model endpoint
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content
@@ -214,7 +222,7 @@ if st.button("🔍 Analyze Soil"):
 # HISTORY SECTION
 # =============================
 st.subheader("📊 पिछले रिपोर्ट")
-reports = session.query(SoilReport).all()
+reports = session.query(SoilReport).order_by(SoilReport.id.desc()).limit(5).all()
 data = [{
     "Farmer": r.farmer_name,
     "pH": r.ph,
